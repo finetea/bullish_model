@@ -4,6 +4,7 @@ gc();
 ### Load packages
 suppressPackageStartupMessages({
   library(doParallel)
+  library(parallel)
   library(dplyr)  
   library(data.table) 
   library(lubridate)
@@ -20,7 +21,11 @@ setwd(dirname(path))
 
 ### Set up for parallel processing
 set.seed(1234)
-registerDoParallel(3, cores = 3)
+
+no_cores <- detectCores() - 1
+no_cores  
+
+registerDoParallel(no_cores, cores = no_cores)
 getDoParWorkers()
 
 
@@ -54,6 +59,7 @@ filenames <- list.files(CURRENCY_PAIR, pattern="*.csv", full.names=TRUE, recursi
 NROW(filenames)
 
 
+start.time <- Sys.time()
 
 trades = list()
 i <- 1
@@ -68,6 +74,9 @@ trades <- do.call(rbind,trades)
 #typeof(trades)
 
 
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+print (paste(time.taken, "for file loading"))
 
 ##########################################################################################
 # data preparation
@@ -100,6 +109,12 @@ from <- ymd_hms(paste(as.character(as.Date(min(trades$date)+hrs(24))),"00:00:00"
 len_out <- difftime(max(trades$date), min(trades$date), units = "min")
 
 checkpoints <- seq(from, by = "min", length.out = len_out)
+NROW(checkpoints)
+
+
+
+start.time.total <- Sys.time()
+
 
 intervals <- c(hrs(1), mns(30), mns(10), mns(5))
 max_inv <- max(intervals)
@@ -111,134 +126,148 @@ train <- list() #result buffer
 trades_smaller <- data.table()
 i <- 1
 
+
+
 for (cp in checkpoints) {
-  #start.time <- Sys.time()
+  start.time.sub <- Sys.time()
+  
+  start.time <- Sys.time()
   
   checkpoint = as.POSIXct(cp, origin="1970-01-01")
-  train_row = data.table(checkpoint=checkpoint)
+  #train_row = data.table(checkpoint=checkpoint)
+  train_row = c(checkpoint)
   #print (checkpoint)
   
-  #end.time <- Sys.time()
-  #time.taken <- end.time - start.time
-  #print (time.taken)
+  end.time <- Sys.time()
+  time.taken <- end.time - start.time
+  #print (paste(time.taken, "for init train_row OK"))
   
   start.time <- Sys.time()
   
   #make smaller chunk of the 'trades' in every day with the size of day + 1hour(MAX_SPAN). 
   #because the 'trades' object is so huge that the subset takes too much time.
-  if ((cp - as.numeric(checkpoints[1])) %% hrs(24) == 0) {
+  size_smaller = hrs(24)
+  if ((cp - as.numeric(checkpoints[1])) %% size_smaller == 0) {
     print ("make trades_smaller")
-    print ((cp - as.numeric(checkpoints[1])) %% hrs(24))
-    trades_smaller <- trades[trades$date >= (cp-MAX_SPAN-MAX_SPAN) & trades$date < (cp+hrs(24)),]
+    print ((cp - as.numeric(checkpoints[1])) %% size_smaller)
+    trades_smaller <- trades[trades$date >= (cp-MAX_SPAN-MAX_SPAN) & trades$date < (cp+size_smaller),]
     print (NROW(trades_smaller))
     print (trades_smaller[1])
     print (trades_smaller[NROW(trades_smaller)])
   }
   
   #trade_chunk <- trades[trades$date >= (cp-max_inv) & trades$date < cp,]
-  #print ("make chunk")
-  print (as.POSIXct((cp-max_inv), origin="1970-01-01"))
   #print (as.POSIXct((cp), origin="1970-01-01"))
   trade_chunk <- trades_smaller[trades_smaller$date >= (cp-max_inv) & trades_smaller$date < cp,]
-  print (NROW(trade_chunk))
+  #print (paste0("make chunk", as.character(NROW(trade_chunk))))
   
   end.time <- Sys.time()
   time.taken <- end.time - start.time
-  print (time.taken)
+  #print (paste(time.taken, "for making trade_chunk"))
   
+  start.time <- Sys.time()
+
   trade_chunk$prices_norm <- normalize(trade_chunk$price, method="range")
   trade_chunk$qty_norm <- normalize(trade_chunk$qty, method="range")
   #plot(x=trade_chunk$date, y=trade_chunk$prices_norm)
   
+  end.time <- Sys.time()
+  time.taken <- end.time - start.time
+  #print (paste(time.taken, "for normalization"))
+  
   for (inv in intervals) {
-    #start.time <- Sys.time()
-
+    start.time <- Sys.time()
+    
     tmp <- trade_chunk[trade_chunk$date >= (cp-inv) & trade_chunk$date < cp,]
+    
     #print (paste(min(tmp$date), "~", max(tmp$date), "(", inv, ")", "has", NROW(tmp), "items"))
     #hist(tmp$prices_norm, main = as.character(inv))
+    
+    end.time <- Sys.time()
+    time.taken <- end.time - start.time
+    #print (paste(time.taken, "for temp variables 1"))
+    
+    start.time <- Sys.time()
+    
     #trade volume
     size<-NROW(tmp)
-    start_price <- tmp$prices_norm[1]
-    end_price <- tmp$prices_norm[size]
-    x<-table(tmp$type)
-    cnt_ask = as.integer(x["ask"])
-    cnt_bid = as.integer(x["bid"])
-    sum_qty<-sum(tmp$qty)
-    sum_ask_qty<-sum(tmp[tmp$type=="ask",]$qty)
-    sum_bid_qty<-sum(tmp[tmp$type=="bid",]$qty)
+    start_price <- ifelse(size==0,0,tmp$prices_norm[1])
+    end_price <- ifelse(size==0,0,tmp$prices_norm[size])
     
-    #end.time <- Sys.time()
-    #time.taken <- end.time - start.time
-    #print (time.taken)
-
-    #start.time <- Sys.time()
+    end.time <- Sys.time()
+    time.taken <- end.time - start.time
+    #print (paste(time.taken, "for temp variables 2"))
+    
+    start.time <- Sys.time()
+    
+    
+    #x<-table(tmp$type)
+    cnt_ask = sum(tmp$type=="ask") #as.integer(x["ask"])
+    cnt_bid = sum(tmp$type=="bid") #as.integer(x["bid"])
+    
+    
+    #sum_qty<-sum(tmp$qty)
+    
+    end.time <- Sys.time()
+    time.taken <- end.time - start.time
+    #print (paste(time.taken, "for temp variables 3"))
+    
+    start.time <- Sys.time()
+    
+    #sum_ask_qty<-sum(tmp[tmp$type=="ask",]$qty)
+    #sum_bid_qty<-sum(tmp[tmp$type=="bid",]$qty)
+    res<-tapply(tmp$qty, tmp$type=="ask", sum)
+    sum_ask_qty<-as.integer(res["TRUE"])
+    sum_bid_qty<-as.integer(res["FALSE"])
+    sum_qty<-sum_ask_qty+sum_bid_qty#sum(tmp$qty)
+    
+    end.time <- Sys.time()
+    time.taken <- end.time - start.time
+    #print (paste(time.taken, "for temp variables 4"))
+    
+    start.time <- Sys.time()
     
     #add features
-    train_row[,paste0('size_',inv) := size]
-    train_row[,paste0('cnt_ask_',inv) := cnt_ask]
-    train_row[,paste0('cnt_bid_',inv) := cnt_bid]
-    train_row[,paste0('sum_qty_',inv) := sum_qty]
-    train_row[,paste0('sum_ask_qty_',inv) := sum_ask_qty]
-    train_row[,paste0('sum_bid_qty_',inv) := sum_bid_qty]
-    train_row[,paste0('rate_ask_qty_',inv) := ifelse(sum_qty==0,0,sum_ask_qty/sum_qty)]
-    train_row[,paste0('rate_bid_qty_',inv) := ifelse(sum_qty==0,0,sum_bid_qty/sum_qty)]
-    train_row[,paste0('avg_qty_',inv) := ifelse(size==0,0,sum_qty/size)]
-    train_row[,paste0('avg_ask_qty_',inv) := ifelse(cnt_ask==0,0,sum_ask_qty/cnt_ask)]
-    train_row[,paste0('avg_bid_qty_',inv) := ifelse(cnt_bid==0,0,sum_bid_qty/cnt_bid)]
-    train_row[,paste0('mean_price_',inv) := mean(tmp$prices_norm)]
-    train_row[,paste0('sd_price_',inv) := sd(tmp$prices_norm)]
-    train_row[,paste0('start_price_',inv) := ifelse(size==0,0,start_price)]
-    train_row[,paste0('end_price_',inv) := ifelse(size==0,0,end_price)]
-    train_row[,paste0('diff_price_',inv) := ifelse(size==0,0,end_price-start_price)]
+    train_row = c(train_row, c(size, cnt_ask, cnt_bid, sum_qty, sum_ask_qty, sum_bid_qty, 
+                               ifelse(sum_qty==0,0,sum_ask_qty/sum_qty), ifelse(sum_qty==0,0,sum_bid_qty/sum_qty),
+                               
+                               ifelse(size==0,0,sum_qty/size), ifelse(cnt_ask==0,0,sum_ask_qty/cnt_ask), ifelse(cnt_bid==0,0,sum_bid_qty/cnt_bid), 
+                               mean(tmp$prices_norm), sd(tmp$prices_norm), ifelse(size==0,0,start_price), ifelse(size==0,0,end_price), 
+                               ifelse(size==0,0,end_price-start_price)))
     
-    #end.time <- Sys.time()
-    #time.taken <- end.time - start.time
-    #print (time.taken)
+    end.time <- Sys.time()
+    time.taken <- end.time - start.time
+    #print (paste(time.taken, "for adding features"))
   }
   
+  start.time <- Sys.time()
+
   train[i] <- list(train_row)
 
+  end.time <- Sys.time()
+  time.taken <- end.time - start.time
+  #print (paste(time.taken, "for appending to a temp train vec"))
+  
   progress = as.integer(i*100/total_cnt)
   if (current_progress != progress) {
     current_progress = progress
-    print (paste("\r\n\r\n", current_progress, "%%\r\n\r\n"))
+    print (paste(current_progress, "%"))
+    cat("")
   }
   i <- i+1
+  
+  end.time.sub <- Sys.time()
+  time.taken.sub <- end.time.sub - start.time.sub
+  #print (paste(time.taken.sub, "for a checkpoint"))
+  
 }
+
 
 
 train <- do.call(rbind,train)
 
 
+end.time.total <- Sys.time()
+time.taken.total <- end.time.total - start.time.total
+print (paste(time.taken.total, "for total process"))
 
-
-
-#train[1440:1450]
-
-
-
-
-#trades[checkpoint>="2017-10-15 19:39:00",]
-#trades_smaller
-
-
-checkpoints <- seq(from, by = "min", length.out = 1440*2+10)#len_out)
-
-hrs(24)
-for (cp in checkpoints) {
-
-  #print ((cp - as.numeric(checkpoints[1])))
-  #print ((cp - as.numeric(checkpoints[1]))/hrs(24))
-  #make smaller chunk of the 'trades' in every day with the size of day + 1hour(MAX_SPAN). 
-  #because the 'trades' object is so huge that the subset takes too much time.
-  if ((cp - as.numeric(checkpoints[1])) %% hrs(24) == 0) {
-    print ("make trades_smaller")
-    print ((cp - as.numeric(checkpoints[1])) / hrs(24))
-    trades_smaller <- trades[trades$date >= (cp-MAX_SPAN-MAX_SPAN) & trades$date < (cp+hrs(24)),]
-    print (NROW(trades_smaller))
-    print (trades_smaller[1])
-    print (trades_smaller[NROW(trades_smaller)])
-  }
-}
-
-trades_smaller$date
