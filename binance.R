@@ -69,6 +69,7 @@ for (fname in filenames) {
   trades[i] <- list(content)
   i = i+1
 }
+rm(content)
 
 trades <- do.call(rbind,trades)
 #typeof(trades)
@@ -100,13 +101,17 @@ summary(trades)
 NROW(trades)
 
 
+##########################################################################################
+# create features
+
+
 MAX_SPAN = hrs(1)  #max time span for data
 
 
 par(mfrow=c(5,1))
 
 from <- ymd_hms(paste(as.character(as.Date(min(trades$date)+hrs(24))),"00:00:00")) + MAX_SPAN #from the beginning of next of min date
-len_out <- difftime(max(trades$date), min(trades$date), units = "min")
+len_out <- difftime(max(trades$date), from, units = "min")
 
 checkpoints <- seq(from, by = "min", length.out = len_out)
 NROW(checkpoints)
@@ -227,7 +232,8 @@ for (cp in checkpoints) {
     
     start.time <- Sys.time()
     
-    #add features
+    #add features 
+    #NOTE!! when add a new feature, the name of the feature must be added as well 
     train_row = c(train_row, c(size, cnt_ask, cnt_bid, sum_qty, sum_ask_qty, sum_bid_qty, 
                                ifelse(sum_qty==0,0,sum_ask_qty/sum_qty), ifelse(sum_qty==0,0,sum_bid_qty/sum_qty),
                                
@@ -267,7 +273,38 @@ for (cp in checkpoints) {
 train <- do.call(rbind,train)
 
 
+#set column names
+cnames = c("checkpoint")
+for (inv in intervals) {
+  cnames = c( cnames, 
+              paste0('size_',inv),
+              paste0('cnt_ask_',inv),
+              paste0('cnt_bid_',inv),
+              paste0('sum_qty_',inv),
+              paste0('sum_ask_qty_',inv),
+              paste0('sum_bid_qty_',inv),
+              paste0('rate_ask_qty_',inv),
+              paste0('rate_bid_qty_',inv),
+              paste0('avg_qty_',inv),
+              paste0('avg_ask_qty_',inv),
+              paste0('avg_bid_qty_',inv),
+              paste0('mean_price_',inv),
+              paste0('sd_price_',inv),
+              paste0('start_price_',inv),
+              paste0('end_price_',inv),
+              paste0('diff_price_',inv)
+  )
+}
+colnames(train) <- cnames
+
+
 end.time.total <- Sys.time()
 time.taken.total <- end.time.total - start.time.total
 print (paste(time.taken.total, "for total process"))
 
+
+
+
+##########################################################################################
+# create labels
+nrow(trades)
