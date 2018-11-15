@@ -73,50 +73,50 @@ CURRENCY_PAIR = "EOSBTC"
 ##########################################################################################
 # read csv input files
 
-filenames <- list.files(CURRENCY_PAIR, pattern="*.csv", full.names=TRUE, recursive = TRUE)
-NROW(filenames)
+if (!exists("trades")) {
+  filenames <- list.files(CURRENCY_PAIR, pattern="*.csv", full.names=TRUE, recursive = TRUE)
+  NROW(filenames)
+  
+  start.time <- Sys.time()
+  
+  trades = list()
+  i <- 1
+  for (fname in filenames) {
+    content <- fread(fname)
+    cat (fname, " has", NROW(content), " element(s).\n")
+    trades[i] <- list(content)
+    i = i+1
+  }
+  rm(content)
+  
+  trades <- do.call(rbind,trades)
+  #typeof(trades)
+  
+  
+  end.time <- Sys.time()
+  time.taken <- end.time - start.time
+  print (paste(time.taken, "for file loading"))
 
-
-start.time <- Sys.time()
-
-trades = list()
-i <- 1
-for (fname in filenames) {
-  content <- fread(fname)
-  cat (fname, " has", NROW(content), " element(s).\n")
-  trades[i] <- list(content)
-  i = i+1
+  
+  # data checking and preparation
+  trades<-subset(trades, select = -c(id))
+  trades<-subset(trades, select = -c(best))
+  
+  # setting up types
+  trades$date <- ymd_hms(trades$date)
+  trades$type <- as.factor(trades$type)
+  
+  trades <- as.data.table(trades)
+  setkey(trades, date)
+  key(trades)
+  
+  
+  head(trades)
+  tail(trades)
+  
+  summary(trades)
+  NROW(trades)
 }
-rm(content)
-
-trades <- do.call(rbind,trades)
-#typeof(trades)
-
-
-end.time <- Sys.time()
-time.taken <- end.time - start.time
-print (paste(time.taken, "for file loading"))
-
-##########################################################################################
-# data preparation
-
-trades<-subset(trades, select = -c(id))
-trades<-subset(trades, select = -c(best))
-
-# setting up types
-trades$date <- ymd_hms(trades$date)
-trades$type <- as.factor(trades$type)
-
-trades <- as.data.table(trades)
-setkey(trades, date)
-key(trades)
-
-
-head(trades)
-tail(trades)
-
-summary(trades)
-NROW(trades)
 
 
 ##########################################################################################
@@ -138,19 +138,28 @@ NROW(checkpoints)
 
 start.time.total <- Sys.time()
 
+SIZE_SMALLER = hrs(24)
 
-intervals <- c(hrs(1), mns(30), mns(10), mns(5))
-max_inv <- max(intervals)
+
+INTERVALS <- c(hrs(1), mns(30), mns(10), mns(5))
+max_inv <- max(INTERVALS)
+
+
+LABEL_RATES = c(0.3, 0.4, 0.5)  #fee of binance is 0.1 for each trade
+label_cond = 1.0+LABEL_RATES/100 #percent
+label_far = mns(5)
+label_far_margin = label_far+mns(5)
+
 
 total_cnt <- NROW(checkpoints)
 current_progress <- 0
 
-train <- list() #result buffer
+trains <- list() #result buffer
+labels <- list()
 trades_smaller <- data.table()
+
+
 i <- 1
-
-
-
 for (cp in checkpoints) {
   start.time.sub <- Sys.time()
   
@@ -169,14 +178,13 @@ for (cp in checkpoints) {
   
   #make smaller chunk of the 'trades' in every day with the size of day + 1hour(MAX_SPAN). 
   #because the 'trades' object is so huge that the subset takes too much time.
-  size_smaller = hrs(24)
-  if ((cp - as.numeric(checkpoints[1])) %% size_smaller == 0) {
-    print ("make trades_smaller")
-    print ((cp - as.numeric(checkpoints[1])) %% size_smaller)
-    trades_smaller <- trades[trades$date >= (cp-MAX_SPAN-MAX_SPAN) & trades$date < (cp+size_smaller),]
-    print (NROW(trades_smaller))
-    print (trades_smaller[1])
-    print (trades_smaller[NROW(trades_smaller)])
+  if ((cp - as.numeric(checkpoints[1])) %% SIZE_SMALLER == 0) {
+    #print ("make trades_smaller")
+    #print ((cp - as.numeric(checkpoints[1])) %% SIZE_SMALLER)
+    trades_smaller <- trades[trades$date >= (cp-MAX_SPAN-MAX_SPAN) & trades$date < (cp+SIZE_SMALLER),]
+    #print (NROW(trades_smaller))
+    print (trades_smaller[1]$date)
+    #print (trades_smaller[NROW(trades_smaller)])
   }
   
   #trade_chunk <- trades[trades$date >= (cp-max_inv) & trades$date < cp,]
@@ -190,15 +198,15 @@ for (cp in checkpoints) {
   
   start.time <- Sys.time()
 
-  trade_chunk$prices_norm <- normalize(trade_chunk$price, method="range")
-  trade_chunk$qty_norm <- normalize(trade_chunk$qty, method="range")
+  trade_chunk$prices_norm <- log2(trade_chunk$price+1)
+  trade_chunk$qty_norm <- log2(trade_chunk$qty+1)
   #plot(x=trade_chunk$date, y=trade_chunk$prices_norm)
   
   end.time <- Sys.time()
   time.taken <- end.time - start.time
   #print (paste(time.taken, "for normalization"))
   
-  for (inv in intervals) {
+  for (inv in INTERVALS) {
     start.time <- Sys.time()
     
     tmp <- trade_chunk[trade_chunk$date >= (cp-inv) & trade_chunk$date < cp,]
@@ -264,14 +272,25 @@ for (cp in checkpoints) {
     #print (paste(time.taken, "for adding features"))
   }
   
+  trains[i] <- list(train_row)
+
   start.time <- Sys.time()
-
-  train[i] <- list(train_row)
-
+  
+  #calculate label
+  cp_price_candidates <- trades_smaller[trades_smaller$date>=(cp-mns(1)) & trades_smaller$date<=(cp),]
+  cp_price <- if(NROW(cp_price_candidates)>0) cp_price_candidates$price[NROW(cp_price_candidates)] else 0
+  label_price_candidates <- trades_smaller[trades_smaller$date>=(cp+label_far) & trades_smaller$date<=(cp+label_far_margin),]
+  label_price <- if(NROW(label_price_candidates)>0) label_price_candidates$price[1] else 0
+  label <- if(cp_price>0 & label_price>0) (label_price - (label_cond*cp_price)) else rep(0,NROW(label_rates)) #label_price is higher than the checkpoint price
+  label <- label>0
+  
   end.time <- Sys.time()
   time.taken <- end.time - start.time
-  #print (paste(time.taken, "for appending to a temp train vec"))
+  #print (paste(time.taken, "for labeling"))
   
+  labels[i] <- list(c(checkpoint, label))
+
+    
   progress = as.integer(i*100/total_cnt)
   if (current_progress != progress) {
     current_progress = progress
@@ -286,14 +305,20 @@ for (cp in checkpoints) {
   
 }
 
-train <- do.call(rbind,train)
+#typeof(trains)
+trains <- do.call(rbind,trains)
+labels <- do.call(rbind,labels)
+#trains <- rbindlist(trains)
+#labels <- rbindlist(labels)
 
 
+# Send message
+bot$sendMessage(chat_id = chat_id, text = "train data is ready")
 
 
 #set column names
 cnames = c("checkpoint")
-for (inv in intervals) {
+for (inv in INTERVALS) {
   cnames = c( cnames, 
               paste0('size_',inv),
               paste0('cnt_ask_',inv),
@@ -313,7 +338,12 @@ for (inv in intervals) {
               paste0('diff_price_',inv)
   )
 }
-colnames(train) <- cnames
+colnames(trains) <- cnames
+
+colnames(labels) <- c("checkpoint", str_replace(paste("label_",label_rates,sep = ''), '\\.', '_'))
+
+
+apply(labels[,c(2:4)], 2, sum)/NROW(labels)
 
 
 end.time.total <- Sys.time()
@@ -323,61 +353,17 @@ print (paste(time.taken.total, "for total process"))
 
 
 
-##########################################################################################
-# create labels
-
-label_rates = c(0.3, 0.4, 0.5)  #fee of binance is 0.1 for each trade
-label_cond = 1.0+label_rates/100 #percent
-label_far = mns(5)
-label_far_margin = label_far+mns(5)
-
-i <- 1
-labels = list()
-
-for (cp in checkpoints) {
-  checkpoint = as.POSIXct(cp, origin="1970-01-01", tz="UTC")
-  
-  #make smaller chunk of the 'trades' in every day with the size of day + 1hour(MAX_SPAN). 
-  #because the 'trades' object is so huge that the subset takes too much time.
-  size_smaller = hrs(24)
-  if ((cp - as.numeric(checkpoints[1])) %% size_smaller == 0) {
-    #print ("make trades_smaller")
-    trades_smaller <- trades[trades$date >= (cp-MAX_SPAN-MAX_SPAN) & trades$date < (cp+size_smaller),]
-    #print (trades_smaller[1])
-    #print (trades_smaller[NROW(trades_smaller)])
-  }
-  
-  #print(checkpoint)
-  cp_price_candidates <- trades_smaller[trades_smaller$date>=(cp-mns(1)) & trades_smaller$date<=(cp),]
-  cp_price <- if(NROW(cp_price_candidates)>0) cp_price_candidates$price[NROW(cp_price_candidates)] else 0
-  label_price_candidates <- trades_smaller[trades_smaller$date>=(cp+label_far) & trades_smaller$date<=(cp+label_far_margin),]
-  label_price <- if(NROW(label_price_candidates)>0) label_price_candidates$price[1] else 0
-  label <- if(cp_price>0 & label_price>0) (label_price - (label_cond*cp_price)) else rep(0,NROW(label_rates)) #label_price is higher than the checkpoint price
-  label <- label>0
-  
-  labels[i] <- list(c(checkpoint, label))
-  i <- i+1
-}
-labels <- do.call(rbind,labels)
-colnames(labels) <- c("checkpoint", str_replace(paste("label_",label_rates,sep = ''), '\\.', '_'))
-
-apply(labels[,c(2:4)], 2, sum)/NROW(labels)
-
-
-
-
-
 
 ##########################################################################################
 # combine data
 
-#train <- train[c(1:NROW(checkpoints)),]
-NROW(train)
+#trains <- trains[c(1:NROW(checkpoints)),]
+NROW(trains)
 NROW(labels)
 
 colnames(labels)
 
-train_data = cbind(train, labels[,2:4])
+train_data = cbind(trains, labels[,2:4])
 train_data<-as.data.table(train_data)
 typeof(train_data)
 colnames(train_data)
@@ -428,10 +414,16 @@ time.taken.learning <- end.time.learning - start.time.learning
 print (paste(time.taken.learning, "for learning"))
 
 
+# Send message
+#bot$sendMessage(chat_id = chat_id, text = "*model is ready*", parse_mode = "Markdown")
+bot$sendMessage(chat_id = chat_id, text = as.character(start.time.learning))
+bot$sendMessage(chat_id = chat_id, text = as.character(end.time.learning))
+bot$sendMessage(chat_id = chat_id, text = result)
+
 
 ##########################
 #with adjusted train_data 
-train_data = cbind(train, labels[,2:4])
+train_data = cbind(trains, labels[,2:4])
 train_data<-as.data.table(train_data)
 typeof(train_data)
 colnames(train_data)
@@ -495,7 +487,7 @@ print (paste(time.taken.learning, "for learning"))
 
 ##########################
 #with adjusted train_data and another label
-train_data = cbind(train, labels[,2:4])
+train_data = cbind(trains, labels[,2:4])
 train_data<-as.data.table(train_data)
 typeof(train_data)
 colnames(train_data)
@@ -562,7 +554,7 @@ print (paste(time.taken.learning, "for learning"))
 
 ##########################
 #with adjusted train_data and another label
-train_data = cbind(train, labels[,2:4])
+train_data = cbind(trains, labels[,2:4])
 train_data<-as.data.table(train_data)
 typeof(train_data)
 colnames(train_data)
@@ -619,6 +611,7 @@ subset(test.set, select=c(label, predicted))
 
 table(test.set$predicted, test.set$label)
 result <- confusionMatrix(test.set$predicted, test.set$label)
+result
 result <- paste(result, collapse = "\n")
 
 
@@ -637,4 +630,6 @@ bot$sendMessage(chat_id = chat_id, text = as.character(start.time.learning))
 bot$sendMessage(chat_id = chat_id, text = as.character(end.time.learning))
 bot$sendMessage(chat_id = chat_id, text = result)
 
+colnames(train_data)
+sum(train_data$label==1)
 
